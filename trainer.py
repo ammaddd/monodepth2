@@ -9,6 +9,7 @@ from __future__ import absolute_import, division, print_function
 import numpy as np
 import time
 
+from comet_ml import Experiment
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
@@ -30,6 +31,8 @@ class Trainer:
     def __init__(self, options):
         self.opt = options
         self.log_path = os.path.join(self.opt.log_dir, self.opt.model_name)
+        self.experiment = Experiment(auto_metric_logging=False)
+        self.experiment.add_tag(self.opt.model_name)
 
         # checking height and width are multiples of 32
         assert self.opt.height % 32 == 0, "'height' must be a multiple of 32"
@@ -165,6 +168,7 @@ class Trainer:
         print("There are {:d} training items and {:d} validation items\n".format(
             len(train_dataset), len(val_dataset)))
 
+        self.experiment.log_others(vars(self.opt))
         self.save_opts()
 
     def set_train(self):
@@ -199,7 +203,7 @@ class Trainer:
         self.set_train()
 
         for batch_idx, inputs in enumerate(self.train_loader):
-
+            
             before_op_time = time.time()
 
             outputs, losses = self.process_batch(inputs)
@@ -214,6 +218,10 @@ class Trainer:
             early_phase = batch_idx % self.opt.log_frequency == 0 and self.step < 2000
             late_phase = self.step % 2000 == 0
 
+            for l, v in losses.items():
+                self.experiment.log_metric("train_{}".format(l), v,
+                                           step=self.step,
+                                           epoch=self.epoch)
             if early_phase or late_phase:
                 self.log_time(batch_idx, duration, losses["loss"].cpu().data)
 
@@ -333,6 +341,10 @@ class Trainer:
             if "depth_gt" in inputs:
                 self.compute_depth_losses(inputs, outputs, losses)
 
+            for l, v in losses.items():
+                self.experiment.log_metric("val_{}".format(l), v,
+                                           step=self.step,
+                                           epoch=self.epoch)
             self.log("val", inputs, outputs, losses)
             del inputs, outputs, losses
 
@@ -550,14 +562,26 @@ class Trainer:
                     writer.add_image(
                         "color_{}_{}/{}".format(frame_id, s, j),
                         inputs[("color", frame_id, s)][j].data, self.step)
+                    self.experiment.log_image(
+                        inputs[("color", frame_id, s)][j].data.detach().cpu().numpy(),
+                        "color_{}_{}/{}".format(frame_id, s, j),
+                        image_channels="first", step=self.step)
                     if s == 0 and frame_id != 0:
                         writer.add_image(
                             "color_pred_{}_{}/{}".format(frame_id, s, j),
                             outputs[("color", frame_id, s)][j].data, self.step)
+                        self.experiment.log_image(
+                            outputs[("color", frame_id, s)][j].data.detach().cpu().numpy(),
+                            "color_pred_{}_{}/{}".format(frame_id, s, j),
+                            image_channels="first", step=self.step)
 
                 writer.add_image(
                     "disp_{}/{}".format(s, j),
                     normalize_image(outputs[("disp", s)][j]), self.step)
+                self.experiment.log_image(
+                    normalize_image(outputs[("disp", s)][j]).detach().cpu().numpy(),
+                    "disp_{}/{}".format(s, j), image_channels="first",
+                    step=self.step)
 
                 if self.opt.predictive_mask:
                     for f_idx, frame_id in enumerate(self.opt.frame_ids[1:]):
@@ -565,11 +589,19 @@ class Trainer:
                             "predictive_mask_{}_{}/{}".format(frame_id, s, j),
                             outputs["predictive_mask"][("disp", s)][j, f_idx][None, ...],
                             self.step)
+                        self.experiment.log_image(
+                            outputs["predictive_mask"][("disp", s)][j, f_idx][None, ...].detach().cpu().numpy(),
+                            "predictive_mask_{}_{}/{}".format(frame_id, s, j),
+                            image_channels="first", step=self.step)
 
                 elif not self.opt.disable_automasking:
                     writer.add_image(
                         "automask_{}/{}".format(s, j),
                         outputs["identity_selection/{}".format(s)][j][None, ...], self.step)
+                    self.experiment.log_image(
+                        outputs["identity_selection/{}".format(s)][j][None, ...].detach().cpu().numpy(),
+                        "automask_{}/{}".format(s, j), image_channels="first",
+                        step=self.step)
 
     def save_opts(self):
         """Save options to disk so we know what we ran this experiment with
@@ -598,9 +630,11 @@ class Trainer:
                 to_save['width'] = self.opt.width
                 to_save['use_stereo'] = self.opt.use_stereo
             torch.save(to_save, save_path)
+            self.experiment.log_model("monodepth", save_path)
 
         save_path = os.path.join(save_folder, "{}.pth".format("adam"))
         torch.save(self.model_optimizer.state_dict(), save_path)
+        self.experiment.log_model("monodepth", save_path)
 
     def load_model(self):
         """Load model(s) from disk

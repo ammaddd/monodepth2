@@ -9,6 +9,7 @@ from __future__ import absolute_import, division, print_function
 import numpy as np
 import time
 
+from PIL import Image
 from comet_ml import Experiment
 import torch
 import torch.nn.functional as F
@@ -218,10 +219,6 @@ class Trainer:
             early_phase = batch_idx % self.opt.log_frequency == 0 and self.step < 2000
             late_phase = self.step % 2000 == 0
 
-            for l, v in losses.items():
-                self.experiment.log_metric("train_{}".format(l), v,
-                                           step=self.step,
-                                           epoch=self.epoch)
             if early_phase or late_phase:
                 self.log_time(batch_idx, duration, losses["loss"].cpu().data)
 
@@ -341,10 +338,6 @@ class Trainer:
             if "depth_gt" in inputs:
                 self.compute_depth_losses(inputs, outputs, losses)
 
-            for l, v in losses.items():
-                self.experiment.log_metric("val_{}".format(l), v,
-                                           step=self.step,
-                                           epoch=self.epoch)
             self.log("val", inputs, outputs, losses)
             del inputs, outputs, losses
 
@@ -555,6 +548,8 @@ class Trainer:
         writer = self.writers[mode]
         for l, v in losses.items():
             writer.add_scalar("{}".format(l), v, self.step)
+            self.experiment.log_metric("{}_{}".format(mode, l), v,
+                                       step=self.step, epoch=self.epoch)
 
         for j in range(min(4, self.opt.batch_size)):  # write a maxmimum of four images
             for s in self.opt.scales:
@@ -562,26 +557,31 @@ class Trainer:
                     writer.add_image(
                         "color_{}_{}/{}".format(frame_id, s, j),
                         inputs[("color", frame_id, s)][j].data, self.step)
-                    self.experiment.log_image(
-                        inputs[("color", frame_id, s)][j].data.detach().cpu().numpy(),
-                        "color_{}_{}/{}".format(frame_id, s, j),
-                        image_channels="first", step=self.step)
+                    if self.step % 200 == 0:
+                        self.experiment.log_image(
+                            inputs[("color", frame_id, s)][j].data.detach().cpu().numpy(),
+                            "color_{}_{}/{}".format(frame_id, s, j),
+                            image_channels="first", step=self.step)
                     if s == 0 and frame_id != 0:
                         writer.add_image(
                             "color_pred_{}_{}/{}".format(frame_id, s, j),
                             outputs[("color", frame_id, s)][j].data, self.step)
-                        self.experiment.log_image(
-                            outputs[("color", frame_id, s)][j].data.detach().cpu().numpy(),
-                            "color_pred_{}_{}/{}".format(frame_id, s, j),
-                            image_channels="first", step=self.step)
+                        if self.step % 200 == 0:
+                            self.experiment.log_image(
+                                outputs[("color", frame_id, s)][j].data.detach().cpu().numpy(),
+                                "color_pred_{}_{}/{}".format(frame_id, s, j),
+                                image_channels="first", step=self.step)
 
                 writer.add_image(
                     "disp_{}/{}".format(s, j),
                     normalize_image(outputs[("disp", s)][j]), self.step)
-                self.experiment.log_image(
-                    normalize_image(outputs[("disp", s)][j]).detach().cpu().numpy(),
-                    "disp_{}/{}".format(s, j), image_channels="first",
-                    step=self.step)
+                if self.step % 200 == 0:
+                    img = normalize_image(outputs[("disp", s)][j]).detach().cpu().numpy()
+                    img = (img[0] * 255).astype(np.uint8)
+                    img = Image.fromarray(img)
+                    self.experiment.log_image(
+                        img, "disp_{}/{}".format(s, j), image_channels="first",
+                        step=self.step)
 
                 if self.opt.predictive_mask:
                     for f_idx, frame_id in enumerate(self.opt.frame_ids[1:]):
@@ -589,19 +589,25 @@ class Trainer:
                             "predictive_mask_{}_{}/{}".format(frame_id, s, j),
                             outputs["predictive_mask"][("disp", s)][j, f_idx][None, ...],
                             self.step)
-                        self.experiment.log_image(
-                            outputs["predictive_mask"][("disp", s)][j, f_idx][None, ...].detach().cpu().numpy(),
-                            "predictive_mask_{}_{}/{}".format(frame_id, s, j),
-                            image_channels="first", step=self.step)
+                        if self.step % 200 == 0:
+                            img = outputs["predictive_mask"][("disp", s)][j, f_idx].detach().cpu().numpy()
+                            img = (img * 255).astype(np.uint8)
+                            img = Image.fromarray(img)
+                            self.experiment.log_image(
+                                img, "predictive_mask_{}_{}/{}".format(frame_id, s, j),
+                                step=self.step)
 
                 elif not self.opt.disable_automasking:
                     writer.add_image(
                         "automask_{}/{}".format(s, j),
                         outputs["identity_selection/{}".format(s)][j][None, ...], self.step)
-                    self.experiment.log_image(
-                        outputs["identity_selection/{}".format(s)][j][None, ...].detach().cpu().numpy(),
-                        "automask_{}/{}".format(s, j), image_channels="first",
-                        step=self.step)
+                    if self.step % 200 == 0:
+                        img = outputs["identity_selection/{}".format(s)][j].detach().cpu().numpy()
+                        img = (img * 255).astype(np.uint8)
+                        img = Image.fromarray(img)
+                        self.experiment.log_image(
+                            img, "automask_{}/{}".format(s, j), step=self.step)
+                    
 
     def save_opts(self):
         """Save options to disk so we know what we ran this experiment with
